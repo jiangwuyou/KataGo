@@ -16,6 +16,10 @@ struct DeviceInfo {
   cl_device_id deviceId;
   std::string name;
   std::string vendor;
+  cl_device_type deviceType;
+  std::string openCLVersion;
+
+  int defaultDesirability;
 
   static constexpr int MAX_PLATFORMS = 32;
   static constexpr int MAX_DEVICES = 512;
@@ -31,12 +35,15 @@ struct InitializedDevice {
 struct DevicesContext {
   cl_context context;
 
+  //Index of the default device to use if not specified (user-provided gpuIdx == -1)
+  int defaultGpuIdx;
+
   //Filtered and initialized subset of allDeviceInfos
   std::vector<InitializedDevice> devicesToUse;
   //All unique names of devices being used
   std::vector<std::string> uniqueDeviceNamesToUse;
 
-  DevicesContext(const std::vector<DeviceInfo>& allDeviceInfos, const std::vector<int>& gpuIdxsToUse, bool enableProfiling);
+  DevicesContext(const std::vector<DeviceInfo>& allDeviceInfos, const std::vector<int>& gpuIdxsToUse, Logger* logger, bool enableProfiling);
   ~DevicesContext();
 
   DevicesContext() = delete;
@@ -120,6 +127,7 @@ namespace OpenCLHelpers {
     int batchSize, int nnXLen, int nnYLen,
     int numTilesX, int numTilesY,
     int inChannels,
+    int convSize,
     cl_event* eventBuf
   );
 
@@ -131,6 +139,7 @@ namespace OpenCLHelpers {
     int batchSize, int nnXLen, int nnYLen,
     int numTilesX, int numTilesY,
     int outChannels,
+    int convSize,
     cl_event* eventBuf
   );
 

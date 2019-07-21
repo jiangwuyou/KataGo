@@ -28,6 +28,7 @@ set(USE_OPENCL_BACKEND 0 CACHE BOOL "Use OpenCL backend")
 set(USE_CUDA_BACKEND 0 CACHE BOOL "Use CUDA backend")
 set(USE_TCMALLOC 0 CACHE BOOL "Use TCMalloc")
 set(NO_GIT_REVISION 0 CACHE BOOL "Disable embedding the git revision into the compiled exe")
+set(Boost_USE_STATIC_LIBS_ON 0 CACHE BOOL "Compile against boost statically instead of dynamically")
 
 #------------------------------------------------------------------------------------
 
@@ -43,7 +44,30 @@ if(BUILD_MCTS)
 
   if(USE_CUDA_BACKEND)
     message("-DUSE_CUDA_BACKEND=1 is set, using CUDA backend")
+
+    # Ensure dynamic cuda linking
+    set(CMAKE_CUDA_FLAGS "" CACHE STRING "")
+    if(CMAKE_CUDA_FLAGS)
+      list(REMOVE_ITEM CMAKE_CUDA_FLAGS "-cudart static")
+    endif()
+    string(APPEND CMAKE_CUDA_FLAGS "-cudart shared")
+
     enable_language(CUDA)
+
+    if(MSVC)
+      # Ensure dynamic cuda linking
+      if(CMAKE_CUDA_HOST_IMPLICIT_LINK_LIBRARIES)
+        list(REMOVE_ITEM CMAKE_CUDA_HOST_IMPLICIT_LINK_LIBRARIES "cudart_static")
+        list(REMOVE_ITEM CMAKE_CUDA_HOST_IMPLICIT_LINK_LIBRARIES "cudadevrt")
+        list(APPEND CMAKE_CUDA_HOST_IMPLICIT_LINK_LIBRARIES "cudart")
+      endif()
+      if(CMAKE_CUDA_IMPLICIT_LINK_LIBRARIES)
+        list(REMOVE_ITEM CMAKE_CUDA_IMPLICIT_LINK_LIBRARIES "cudart_static")
+        list(REMOVE_ITEM CMAKE_CUDA_IMPLICIT_LINK_LIBRARIES "cudadevrt")
+        list(APPEND CMAKE_CUDA_IMPLICIT_LINK_LIBRARIES "cudart")
+      endif()
+    endif()
+
     set(CUDA_STANDARD 11)
     set(NEURALNET_BACKEND_SOURCES neuralnet/cudabackend.cpp neuralnet/cudahelpers.cu)
     set(CMAKE_CUDA_FLAGS
@@ -121,6 +145,7 @@ endif()
 
 if(BUILD_WRITE)
   add_executable(write
+    core/datetime.cpp
     core/global.cpp
     core/hash.cpp
     core/md5.cpp
@@ -162,6 +187,7 @@ if(BUILD_MCTS)
   add_executable(katago
     core/global.cpp
     core/config_parser.cpp
+    core/datetime.cpp
     core/elo.cpp
     core/fancymath.cpp
     core/hash.cpp
@@ -226,8 +252,12 @@ if(BUILD_MCTS)
   if(USE_CUDA_BACKEND)
     target_compile_definitions(katago PRIVATE USE_CUDA_BACKEND)
     find_package(CUDA REQUIRED)
+    find_path(CUDNN_INCLUDE_DIR cudnn.h HINTS ${CUDNN_ROOT_DIR} ${CUDA_TOOLKIT_ROOT_DIR} PATH_SUFFIXES cuda/include include)
+    if((NOT CUDNN_INCLUDE_DIR))
+      message(ERROR "${ColorBoldRed} cudnn.h was NOT found, specify CUDNN_INCLUDE_DIR to indicate where it is. ${ColorReset}")
+    endif()
     find_library(CUDNN_LIBRARY libcudnn.so PATHS /usr/local/cuda/lib64 /opt/cuda/lib64)
-    include_directories(SYSTEM ${CUDA_INCLUDE_DIRS}) #SYSTEM is for suppressing some compiler warnings in thrust libraries
+    include_directories(SYSTEM ${CUDA_INCLUDE_DIRS} ${CUDNN_INCLUDE_DIR}) #SYSTEM is for suppressing some compiler warnings in thrust libraries
     target_link_libraries(katago ${CUDNN_LIBRARY} ${CUDA_CUBLAS_LIBRARIES} ${CUDA_LIBRARIES})
   elseif(USE_OPENCL_BACKEND)
     target_compile_definitions(katago PRIVATE USE_OPENCL_BACKEND)
@@ -259,16 +289,18 @@ if(BUILD_MCTS)
     target_link_libraries(katago ${LIBZIP_LIBRARY})
   endif()
 
+  if(Boost_USE_STATIC_LIBS_ON)
+    set(Boost_USE_STATIC_LIBS ON)
+  endif()
   find_package(Boost COMPONENTS system filesystem REQUIRED)
   include_directories(${Boost_INCLUDE_DIRS})
   target_link_libraries(katago ${Boost_FILESYSTEM_LIBRARY} ${Boost_SYSTEM_LIBRARY})
   # Getting boost to work on MSVC seems to require forcing it to link
-  # with dlls instead of static, and needs these options
-  if(MSVC)
-    target_compile_definitions(katago PRIVATE BOOST_ALL_NO_LIB)
+  # with dlls instead of static, and needs this option
+  if(MSVC AND (NOT Boost_USE_STATIC_LIBS_ON))
     target_compile_definitions(katago PRIVATE BOOST_ALL_DYN_LINK)
   endif()
-  
+
   if(USE_TCMALLOC)
     target_link_libraries(katago ${TCMALLOC_LIB})
   endif(USE_TCMALLOC)
@@ -282,6 +314,8 @@ if(BUILD_MCTS)
     target_compile_definitions(katago PRIVATE BIG_ENDIAN=4321)
     # core/rand.cpp uses winsock for a gethostname
     target_link_libraries(katago ws2_32)
+    
+    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} /STACK:8388608")
   endif()
 
   # On g++ it seems like we need to explicitly link threads as well.
@@ -301,10 +335,10 @@ endif()
 
 if(CMAKE_COMPILER_IS_GNUCC)
   if(USE_TCMALLOC)
-    set(CMAKE_CXX_FLAGS  "${CMAKE_CXX_FLAGS} -mfpmath=sse -g -O2 -pedantic -Wall -Wextra -Wno-sign-compare -Wcast-align -Wcast-qual -Wctor-dtor-privacy -Wdisabled-optimization -Wformat=2 -Winit-self -Wlogical-op -Wmissing-declarations -Wmissing-include-dirs -Wnoexcept -Woverloaded-virtual -Wredundant-decls -Wshadow -Wstrict-null-sentinel -Wstrict-overflow=1 -Wswitch-default -Wsizeof-pointer-memaccess -Wuninitialized -Winit-self -fno-builtin-malloc -fno-builtin-calloc -fno-builtin-realloc -fno-builtin-free")
+    set(CMAKE_CXX_FLAGS  "${CMAKE_CXX_FLAGS} -mfpmath=sse -g -O2 -pedantic -Wall -Wextra -Wno-sign-compare -Wcast-align -Wcast-qual -Wctor-dtor-privacy -Wdisabled-optimization -Wformat=2 -Wlogical-op -Wmissing-declarations -Wmissing-include-dirs -Wnoexcept -Woverloaded-virtual -Wredundant-decls -Wshadow -Wstrict-null-sentinel -Wstrict-overflow=1 -Wswitch-default -Wfloat-conversion -Wnull-dereference -Wunused -Walloc-zero -Wduplicated-branches -Wduplicated-cond -Wdangling-else -Wrestrict -fno-builtin-malloc -fno-builtin-calloc -fno-builtin-realloc -fno-builtin-free")
     set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fno-builtin-malloc -fno-builtin-calloc -fno-builtin-realloc -fno-builtin-free")
   else()
-    set(CMAKE_CXX_FLAGS  "${CMAKE_CXX_FLAGS} -mfpmath=sse -g -O2 -pedantic -Wall -Wextra -Wno-sign-compare -Wcast-align -Wcast-qual -Wctor-dtor-privacy -Wdisabled-optimization -Wformat=2 -Winit-self -Wlogical-op -Wmissing-declarations -Wmissing-include-dirs -Wnoexcept -Woverloaded-virtual -Wredundant-decls -Wshadow -Wstrict-null-sentinel -Wstrict-overflow=1 -Wswitch-default -Wsizeof-pointer-memaccess -Wuninitialized -Winit-self")
+    set(CMAKE_CXX_FLAGS  "${CMAKE_CXX_FLAGS} -mfpmath=sse -g -O2 -pedantic -Wall -Wextra -Wno-sign-compare -Wcast-align -Wcast-qual -Wctor-dtor-privacy -Wdisabled-optimization -Wformat=2 -Wlogical-op -Wmissing-declarations -Wmissing-include-dirs -Wnoexcept -Woverloaded-virtual -Wredundant-decls -Wshadow -Wstrict-null-sentinel -Wstrict-overflow=1 -Wswitch-default -Wfloat-conversion -Wnull-dereference -Wunused -Walloc-zero -Wduplicated-branches -Wduplicated-cond -Wdangling-else -Wrestrict")
   endif()
 endif()
 

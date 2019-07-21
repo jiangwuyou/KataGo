@@ -45,11 +45,13 @@ namespace NeuralNet {
 
   ComputeContext* createComputeContext(
     //The indices of all gpus that this context will be used for.
+    //-1 as an entry indicates to select a default
     const std::vector<int>& gpuIdxs,
     Logger* logger,
     int nnXLen,
     int nnYLen,
     std::string openCLTunerFile,
+    bool openCLReTunePerBoardSize,
     const LoadedModel* loadedModel
   );
   //A ComputeContext should NOT be freed until all ComputeHandles created using it have also been freed.
@@ -63,6 +65,7 @@ namespace NeuralNet {
   // some info messages to it. If requireExactNNLen is true, the backend is
   // allowed to assume that all boards to evaluate will be of size exactly equal
   // to (nnXLen,nnYLen) rather than smaller, and skip any masking operations.
+  // gpuIdxForThisThread == -1 indicates to select a default GPU.
   ComputeHandle* createComputeHandle(
     ComputeContext* context,
     const LoadedModel* loadedModel,

@@ -506,7 +506,7 @@ bool Search::getPlaySelectionValuesAlreadyLocked(
     return false;
 
   //Sanity check - if somehow we had more than this, something must have overflowed or gone wrong
-  assert(maxValue < 1e16);
+  assert(maxValue < 1e40);
 
   double amountToSubtract = std::min(searchParams.chosenMoveSubtract, maxValue/64.0);
   double amountToPrune = std::min(searchParams.chosenMovePrune, maxValue/64.0);
@@ -855,6 +855,16 @@ void Search::beginSearch(Logger& logger) {
   if(rootBoard.x_size > nnXLen || rootBoard.y_size > nnYLen)
     throw StringError("Search got from NNEval nnXLen = " + Global::intToString(nnXLen) +
                       " nnYLen = " + Global::intToString(nnYLen) + " but was asked to search board with larger x or y size");
+
+  //If we're being asked to search from a position where the game is over, clear all the history state that had us
+  //believe the game was over and do a normal search
+  if(rootHistory.isGameFinished) {
+    clearSearch();
+    Rules rules = rootHistory.rules;
+    rootHistory.clear(rootBoard,rootPla,rules,rootHistory.encorePhase);
+    rootKoHashTable->recompute(rootHistory);
+  }
+
   rootBoard.checkConsistency();
 
   numSearchesBegun++;
@@ -1078,7 +1088,7 @@ void Search::addDirichletNoise(const SearchParams& searchParams, Rand& rand, int
   for(int i = 0; i<policySize; i++) {
     if(policyProbs[i] >= 0) {
       double weight = searchParams.rootDirichletNoiseWeight;
-      policyProbs[i] = r[i] * weight + policyProbs[i] * (1.0-weight);
+      policyProbs[i] = (float)(r[i] * weight + policyProbs[i] * (1.0-weight));
     }
   }
 }
@@ -1112,7 +1122,7 @@ void Search::maybeAddPolicyNoise(SearchThread& thread, SearchNode& node, bool is
     for(int i = 0; i<policySize; i++) {
       if(node.nnOutput->policyProbs[i] > 0) {
         //Numerically stable way to raise to power and normalize
-        double p = exp((log((double)node.nnOutput->policyProbs[i]) - logMaxValue) * invTemp);
+        float p = (float)exp((log((double)node.nnOutput->policyProbs[i]) - logMaxValue) * invTemp);
         node.nnOutput->policyProbs[i] = p;
         sum += p;
       }
@@ -1120,7 +1130,7 @@ void Search::maybeAddPolicyNoise(SearchThread& thread, SearchNode& node, bool is
     assert(sum > 0.0);
     for(int i = 0; i<policySize; i++) {
       if(node.nnOutput->policyProbs[i] >= 0) {
-        node.nnOutput->policyProbs[i] = (double)node.nnOutput->policyProbs[i] / sum;
+        node.nnOutput->policyProbs[i] = (float)(node.nnOutput->policyProbs[i] / sum);
       }
     }
   }
@@ -2326,6 +2336,7 @@ void Search::printTree(ostream& out, const SearchNode* node, PrintTreeOptions op
     );
     data.weightFactor = NAN;
   }
+  perspective = (perspective != P_BLACK && perspective != P_WHITE) ? node->nextPla : perspective;
   printTreeHelper(out, node, options, prefix, 0, 0, data, perspective);
 }
 

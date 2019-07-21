@@ -1,6 +1,7 @@
 #include "core/global.h"
 #include "core/config_parser.h"
 #include "core/timer.h"
+#include "dataio/sgf.h"
 #include "search/asyncbot.h"
 #include "program/setup.h"
 #include "program/play.h"
@@ -31,11 +32,11 @@ static const vector<string> knownCommands = {
   "undo",
 
   "genmove",
-  "genmove-debug", //Prints additional info to stderr
-  "search-debug", //Prints additional info to stderr, doesn't actually make the move
+  "genmove_debug", //Prints additional info to stderr
+  "search_debug", //Prints additional info to stderr, doesn't actually make the move
 
   //Clears neural net cached evaluations and bot search tree, allows fresh randomization
-  "clear-cache",
+  "clear_cache",
 
   "showboard",
   "place_free_handicap",
@@ -44,6 +45,8 @@ static const vector<string> knownCommands = {
   "time_left",
   "final_score",
   "final_status_list",
+
+  "loadsgf",
 
   //GTP extensions for board analysis
   "lz-analyze",
@@ -71,8 +74,21 @@ static bool tryParseLoc(const string& s, const Board& b, Loc& loc) {
   return Location::tryOfString(s,b,loc);
 }
 
-static int numHandicapStones(const BoardHistory& hist) {
-  const Board board = hist.initialBoard;
+static int numHandicapStones(const Board& initialBoard, const vector<Move>& moveHistory) {
+  //Make the longest possible contiguous sequence of black moves - treat a string of consecutive black
+  //moves at the start of the game as "handicap"
+  Board board = initialBoard;
+  for(int i = 0; i<moveHistory.size(); i++) {
+    Loc moveLoc = moveHistory[i].loc;
+    Player movePla = moveHistory[i].pla;
+    if(movePla != P_BLACK)
+      break;
+    bool isMultiStoneSuicideLegal = true;
+    bool suc = board.playMove(moveLoc,movePla,isMultiStoneSuicideLegal);
+    if(!suc)
+      break;
+  }
+
   int startBoardNumBlackStones = 0;
   int startBoardNumWhiteStones = 0;
   for(int y = 0; y<board.y_size; y++) {
@@ -85,27 +101,30 @@ static int numHandicapStones(const BoardHistory& hist) {
     }
   }
   //If we set up in a nontrivial position, then consider it a non-handicap game.
-  if(startBoardNumWhiteStones == 0)
-    return startBoardNumBlackStones;
-  return 0;
+  if(startBoardNumWhiteStones != 0)
+    return 0;
+  //If there was only one "handicap" stone, then it was a regular game
+  if(startBoardNumBlackStones <= 1)
+    return 0;
+  return startBoardNumBlackStones;
 }
 
 static bool shouldResign(
-  const AsyncBot* bot,
+  const Board initialBoard,
+  const vector<Move>& moveHistory,
+  const Rules& rules,
   Player pla,
   const vector<double>& recentWinLossValues,
   double expectedScore,
   const double resignThreshold,
   const int resignConsecTurns
 ) {
-  const BoardHistory hist = bot->getRootHist();
-  const Board initialBoard = hist.initialBoard;
-
   //Assume an advantage of 15 * number of black stones beyond the one black normally gets on the first move and komi
-  int extraBlackStones = numHandicapStones(hist);
-  if(hist.initialPla == P_WHITE && extraBlackStones > 0)
+  int extraBlackStones = numHandicapStones(initialBoard,moveHistory);
+  //Subtract one since white gets the first move afterward
+  if(extraBlackStones > 0)
     extraBlackStones -= 1;
-  double handicapBlackAdvantage = 15.0 * extraBlackStones + (7.5 - hist.rules.komi);
+  double handicapBlackAdvantage = 15.0 * extraBlackStones + (7.5 - rules.komi);
 
   int minTurnForResignation = 0;
   double noResignationWhenWhiteScoreAbove = initialBoard.x_size * initialBoard.y_size;
@@ -116,7 +135,7 @@ static bool shouldResign(
     //In a handicap game, also only resign if the expected score difference is well behind schedule assuming
     //that we're supposed to catch up over many moves.
     double numTurnsToCatchUp = 0.60 * initialBoard.x_size * initialBoard.y_size - minTurnForResignation;
-    double numTurnsSpent = (double)(hist.moveHistory.size()) - minTurnForResignation;
+    double numTurnsSpent = (double)(moveHistory.size()) - minTurnForResignation;
     if(numTurnsToCatchUp <= 1.0)
       numTurnsToCatchUp = 1.0;
     if(numTurnsSpent <= 0.0)
@@ -131,7 +150,7 @@ static bool shouldResign(
     noResignationWhenWhiteScoreAbove = resignScore;
   }
 
-  if(hist.moveHistory.size() < minTurnForResignation)
+  if(moveHistory.size() < minTurnForResignation)
     return false;
   if(pla == P_WHITE && expectedScore > noResignationWhenWhiteScoreAbove)
     return false;
@@ -281,11 +300,11 @@ struct GTPEngine {
 
   void setPosition(Player pla, const Board& board, const BoardHistory& hist, const Board& newInitialBoard, Player newInitialPla, const vector<Move> newMoveHistory) {
     bot->setPosition(pla,board,hist);
-    updateKomiIfNew(unhackedKomi);
-    recentWinLossValues.clear();
     initialBoard = newInitialBoard;
     initialPla = newInitialPla;
     moveHistory = newMoveHistory;
+    recentWinLossValues.clear();
+    updateKomiIfNew(unhackedKomi);
   }
 
   void clearBoard() {
@@ -298,12 +317,13 @@ struct GTPEngine {
     setPosition(pla,board,hist,board,pla,newMoveHistory);
   }
 
-  void updateKomiIfNew(double newUnhackedKomi) {
+  void updateKomiIfNew(float newUnhackedKomi) {
     //Komi without whiteBonusPerHandicapStone hack
     unhackedKomi = newUnhackedKomi;
 
     float newKomi = unhackedKomi;
-    newKomi += numHandicapStones(bot->getRootHist()) * whiteBonusPerHandicapStone;
+    int nHandicapStones = numHandicapStones(initialBoard,moveHistory);
+    newKomi += (float)(nHandicapStones * whiteBonusPerHandicapStone);
     if(newKomi != bot->getRootHist().rules.komi)
       recentWinLossValues.clear();
     bot->setKomiIfNew(newKomi);
@@ -313,6 +333,9 @@ struct GTPEngine {
     bool suc = bot->makeMove(loc,pla);
     if(suc)
       moveHistory.push_back(Move(loc,pla));
+
+    //Black consecutive moves at the start can change the "handicap" which can cause us to adjust komi
+    updateKomiIfNew(unhackedKomi);
     return suc;
   }
 
@@ -329,7 +352,7 @@ struct GTPEngine {
 
     for(int i = 0; i<moveHistoryCopy.size()-1; i++) {
       Loc moveLoc = moveHistoryCopy[i].loc;
-      Loc movePla = moveHistoryCopy[i].pla;
+      Player movePla = moveHistoryCopy[i].pla;
       bool suc = play(moveLoc,movePla);
       assert(suc);
       (void)suc; //Avoid warning when asserts are off
@@ -431,7 +454,9 @@ struct GTPEngine {
 
     recentWinLossValues.push_back(winLossValue);
 
-    bool resigned = allowResignation && shouldResign(bot,pla,recentWinLossValues,expectedScore,resignThreshold,resignConsecTurns);
+    bool resigned = allowResignation && shouldResign(
+      initialBoard,moveHistory,bot->getRootHist().rules,pla,recentWinLossValues,expectedScore,resignThreshold,resignConsecTurns
+    );
 
     if(resigned)
       response = "resign";
@@ -453,6 +478,10 @@ struct GTPEngine {
         moveHistory.push_back(Move(moveLoc,pla));
       assert(suc);
       (void)suc; //Avoid warning when asserts are off
+
+      //Black consecutive moves at the start can change the "handicap" which can cause us to adjust komi
+      updateKomiIfNew(unhackedKomi);
+
       maybeStartPondering = true;
     }
     return;
@@ -677,12 +706,21 @@ int MainCmds::gtp(int argc, const char* const* argv) {
   bool logSearchInfo = cfg.getBool("logSearchInfo");
   bool loggingToStderr = false;
 
+  bool startupPrintMessageToStderr = true;
+  if(cfg.contains("startupPrintMessageToStderr"))
+    startupPrintMessageToStderr = cfg.getBool("startupPrintMessageToStderr");
+
   if(cfg.contains("logToStderr") && cfg.getBool("logToStderr")) {
     loggingToStderr = true;
     logger.setLogToStderr(true);
   }
 
   logger.write("GTP Engine starting...");
+  logger.write(Version::getKataGoVersionForHelp());
+  //Also check loggingToStderr so that we don't duplicate the message from the log file
+  if(startupPrintMessageToStderr && !loggingToStderr) {
+    cerr << Version::getKataGoVersionForHelp() << endl;
+  }
 
   Rules initialRules;
   {
@@ -720,10 +758,6 @@ int MainCmds::gtp(int argc, const char* const* argv) {
   const bool ogsChatToStderr = cfg.contains("ogsChatToStderr") ? cfg.getBool("ogsChatToStderr") : false;
   const int analysisPVLen = cfg.contains("analysisPVLen") ? cfg.getInt("analysisPVLen",1,50) : 9;
 
-  bool startupPrintMessageToStderr = true;
-  if(cfg.contains("startupPrintMessageToStderr"))
-    startupPrintMessageToStderr = cfg.getBool("startupPrintMessageToStderr");
-
   Player perspective = Setup::parseReportAnalysisWinrates(cfg,C_EMPTY);
 
   GTPEngine* engine = new GTPEngine(nnModelFile,params,initialRules,whiteBonusPerHandicapStone,perspective,analysisPVLen);
@@ -732,12 +766,10 @@ int MainCmds::gtp(int argc, const char* const* argv) {
   //Check for unused config keys
   cfg.warnUnusedKeys(cerr,&logger);
 
-  logger.write(Version::getKataGoVersionForHelp());
   logger.write("Loaded model "+ nnModelFile);
   logger.write("GTP ready, beginning main protocol loop");
   //Also check loggingToStderr so that we don't duplicate the message from the log file
   if(startupPrintMessageToStderr && !loggingToStderr) {
-    cerr << Version::getKataGoVersionForHelp() << endl;
     cerr << "Loaded model " << nnModelFile << endl;
     cerr << "GTP ready, beginning main protocol loop" << endl;
   }
@@ -1072,7 +1104,7 @@ int MainCmds::gtp(int argc, const char* const* argv) {
       }
     }
 
-    else if(command == "genmove" || command == "genmove-debug" || command == "search-debug") {
+    else if(command == "genmove" || command == "genmove_debug" || command == "search_debug") {
       Player pla;
       if(pieces.size() != 1) {
         responseIsError = true;
@@ -1083,8 +1115,8 @@ int MainCmds::gtp(int argc, const char* const* argv) {
         response = "Could not parse color: '" + pieces[0] + "'";
       }
       else {
-        bool debug = command == "genmove-debug" || command == "search-debug";
-        bool playChosenMove = command != "search-debug";
+        bool debug = command == "genmove_debug" || command == "search_debug";
+        bool playChosenMove = command != "search_debug";
 
         engine->genMove(
           pla,
@@ -1097,7 +1129,7 @@ int MainCmds::gtp(int argc, const char* const* argv) {
       }
     }
 
-    else if(command == "clear-cache") {
+    else if(command == "clear_cache") {
       engine->clearCache();
     }
     else if(command == "showboard") {
@@ -1236,6 +1268,83 @@ int MainCmds::gtp(int argc, const char* const* argv) {
             if(i > 0)
               response += " ";
             response += Location::toString(loc,board);
+          }
+        }
+      }
+    }
+
+    else if(command == "loadsgf") {
+      if(pieces.size() != 1 && pieces.size() != 2) {
+        responseIsError = true;
+        response = "Expected one or two arguments for loadsgf but got '" + Global::concat(pieces," ") + "'";
+      }
+      else {
+        string filename = pieces[0];
+        bool parseFailed = false;
+        bool moveNumberSpecified = false;
+        int moveNumber = 0;
+        if(pieces.size() == 2) {
+          bool suc = Global::tryStringToInt(pieces[1],moveNumber);
+          if(!suc || moveNumber < 0 || moveNumber > 10000000)
+            parseFailed = true;
+          else {
+            moveNumberSpecified = true;
+          }
+        }
+        if(parseFailed) {
+          responseIsError = true;
+          response = "Invalid value for moveNumber for loadsgf";
+        }
+        else {
+          Board sgfInitialBoard;
+          Player sgfInitialNextPla;
+          BoardHistory sgfInitialHist;
+          Board sgfBoard;
+          Player sgfNextPla;
+          BoardHistory sgfHist;
+
+          bool sgfParseSuccess = false;
+          CompactSgf* sgf = NULL;
+          try {
+            sgf = CompactSgf::loadFile(filename);
+
+            if(!moveNumberSpecified || moveNumber > sgf->moves.size())
+              moveNumber = sgf->moves.size();
+
+            sgf->setupInitialBoardAndHist(engine->bot->getRootHist().rules, sgfInitialBoard, sgfInitialNextPla, sgfInitialHist);
+            sgfBoard = sgfInitialBoard;
+            sgfNextPla = sgfInitialNextPla;
+            sgfHist = sgfInitialHist;
+            for(size_t i = 0; i<moveNumber; i++) {
+              Loc moveLoc = sgf->moves[i].loc;
+              Player movePla = sgf->moves[i].pla;
+              bool multiStoneSuicideLegal = true; //Tolerate suicide regardless of our own rules
+              if(!sgfBoard.isLegal(moveLoc,movePla,multiStoneSuicideLegal)) {
+                throw StringError("Illegal move");
+              }
+              sgfHist.makeBoardMoveAssumeLegal(sgfBoard,moveLoc,movePla,NULL);
+              sgfNextPla = getOpp(movePla);
+            }
+
+            Rules sgfRules = sgf->getRulesFromSgf(sgfHist.rules);
+            if(sgfRules != sgfHist.rules)
+              cerr << "WARNING: Loaded sgf has rules " << sgfRules << " but GTP is set to rules " << sgfHist.rules << endl;
+
+            delete sgf;
+            sgf = NULL;
+            sgfParseSuccess = true;
+          }
+          catch(...) {
+            delete sgf;
+            sgf = NULL;
+          }
+
+          if(sgfParseSuccess) {
+            engine->setPosition(sgfNextPla, sgfBoard, sgfHist, sgfInitialBoard, sgfInitialNextPla, sgfHist.moveHistory);
+          }
+          else {
+            responseIsError = true;
+            response = "cannot load file";
           }
         }
       }

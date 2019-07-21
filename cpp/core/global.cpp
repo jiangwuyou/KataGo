@@ -42,21 +42,6 @@ void Global::fatalError(const string& s)
   exit(EXIT_FAILURE);
 }
 
-//TIME------------------------------------
-
-string Global::getDateString()
-{
-  time_t rawtime;
-  time(&rawtime);
-  tm* ptm = gmtime(&rawtime);
-
-  ostringstream out;
-  out << (ptm->tm_year+1900) << "-"
-      << (ptm->tm_mon+1) << "-"
-      << (ptm->tm_mday);
-  return out.str();
-}
-
 //STRINGS---------------------------------
 
 string Global::boolToString(bool b)
@@ -613,13 +598,6 @@ string Global::stripComments(const string& str)
     result += "\n";
   }
   return result;
-}
-
-string Global::getCompactDateTimeString() {
-  time_t time = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
-  ostringstream out;
-  out << std::put_time(std::localtime(&time), "%Y%m%d-%H%M%S");
-  return out.str();
 }
 
 uint64_t Global::readMem(const string& str)

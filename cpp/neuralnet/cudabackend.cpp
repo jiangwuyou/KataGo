@@ -2602,6 +2602,7 @@ ComputeContext* NeuralNet::createComputeContext(
   int nnXLen,
   int nnYLen,
   string openCLTunerFile,
+  bool openCLReTunePerBoardSize,
   const LoadedModel* loadedModel
 ) {
   (void)gpuIdxs;
@@ -2609,6 +2610,7 @@ ComputeContext* NeuralNet::createComputeContext(
   (void)nnXLen;
   (void)nnYLen;
   (void)openCLTunerFile;
+  (void)openCLReTunePerBoardSize;
   (void)loadedModel;
   return NULL;
 }
@@ -2680,6 +2682,10 @@ ComputeHandle* NeuralNet::createComputeHandle(
   bool useNHWC
 ) {
   (void)context;
+
+  //Use whatever CUDA believes GPU 0 to be.
+  if(gpuIdxForThisThread == -1)
+    gpuIdxForThisThread = 0;
 
   CUDA_ERR("createComputeHandle",cudaSetDevice(gpuIdxForThisThread));
 

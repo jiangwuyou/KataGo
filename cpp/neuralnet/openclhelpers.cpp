@@ -193,7 +193,7 @@ vector<DeviceInfo> DeviceInfo::getAllDeviceInfosOnSystem(Logger* logger) {
   char buf[bufLen];
   for(int i = 0; i<bufLen; i++)
     buf[i] = '\0';
-  
+
   int numDevicesTotal = 0;
   vector<cl_device_id> deviceIds(MAX_DEVICES);
   for(int platformIdx = 0; platformIdx < numPlatforms && numDevicesTotal < deviceIds.size(); platformIdx++) {
@@ -216,7 +216,7 @@ vector<DeviceInfo> DeviceInfo::getAllDeviceInfosOnSystem(Logger* logger) {
 
     if(logger != NULL)
       logger->write("Found OpenCL Platform " + Global::intToString(platformIdx) + ": " + name + " (" + vendor + ") (" + version + ")");
-    
+
     cl_uint numDevices;
     err = clGetDeviceIDs(
       platformIds[platformIdx], CL_DEVICE_TYPE_GPU | CL_DEVICE_TYPE_ACCELERATOR, deviceIds.size() - numDevicesTotal,
@@ -224,15 +224,15 @@ vector<DeviceInfo> DeviceInfo::getAllDeviceInfosOnSystem(Logger* logger) {
     //Allow there to be 0 devices on this platform, just move on to the next
     if(err == CL_DEVICE_NOT_FOUND) {
       if(logger != NULL)
-        logger->write("Found 0 device(s) on platform " + Global::intToString(platformIdx) + " with type GPU or Accelerator, skipping");  
+        logger->write("Found 0 device(s) on platform " + Global::intToString(platformIdx) + " with type GPU or Accelerator, skipping");
       continue;
     }
-    
+
     CHECK_ERR(err);
     assert(numDevices <= deviceIds.size());
     numDevicesTotal += numDevices;
     if(logger != NULL)
-      logger->write("Found " + Global::intToString(numDevices) + " device(s) on platform " + Global::intToString(platformIdx) + " with type GPU or Accelerator");  
+      logger->write("Found " + Global::intToString(numDevices) + " device(s) on platform " + Global::intToString(platformIdx) + " with type GPU or Accelerator");
   }
   deviceIds.resize(numDevicesTotal);
 
@@ -250,14 +250,56 @@ vector<DeviceInfo> DeviceInfo::getAllDeviceInfosOnSystem(Logger* logger) {
     CHECK_ERR(err);
     string vendor = string(buf);
 
+    cl_device_type deviceType;
+    err = clGetDeviceInfo(deviceIds[gpuIdx], CL_DEVICE_TYPE, sizeof(cl_device_type), &deviceType, &sizeRet);
+    assert(sizeRet <= sizeof(cl_device_type));
+    CHECK_ERR(err);
+
+    err = clGetDeviceInfo(deviceIds[gpuIdx], CL_DEVICE_VERSION, bufLen, buf, &sizeRet);
+    assert(sizeRet < bufLen-1);
+    CHECK_ERR(err);
+    string openCLVersion = string(buf);
+
     if(logger != NULL)
       logger->write("Found OpenCL Device " + Global::intToString(gpuIdx) + ": " + name + " (" + vendor + ")");
+
+    int defaultDesirability = 0;
+    //Compute desirability for this device for default device selection
+    {
+      string lowercaseVendor = Global::toLower(vendor);
+      if(lowercaseVendor.find("advanced micro devices") != string::npos) defaultDesirability += 1000000;
+      else if(lowercaseVendor.find("amd") != string::npos) defaultDesirability += 1000000;
+      else if(lowercaseVendor.find("nvidia") != string::npos) defaultDesirability += 1000000;
+      else if(lowercaseVendor.find("intel") != string::npos) defaultDesirability += 500000;
+
+      if(deviceType == CL_DEVICE_TYPE_GPU) defaultDesirability += 100000;
+      else if(deviceType == CL_DEVICE_TYPE_ACCELERATOR) defaultDesirability += 50000;
+      else if((deviceType & CL_DEVICE_TYPE_GPU) != 0) defaultDesirability += 20000;
+      else if(deviceType == CL_DEVICE_TYPE_DEFAULT) defaultDesirability += 10000;
+
+      vector<string> versionPieces = Global::split(Global::trim(openCLVersion));
+      if(versionPieces.size() >= 2) {
+        vector<string> majorMinor = Global::split(Global::trim(versionPieces[1]),'.');
+        if(majorMinor.size() == 2) {
+          int major = 0;
+          int minor = 0;
+          bool sucMajor = Global::tryStringToInt(majorMinor[0],major);
+          bool sucMinor = Global::tryStringToInt(majorMinor[1],minor);
+          if(sucMajor && sucMinor && major >= 0 && major < 100 && minor >= 0 && minor < 100) {
+            defaultDesirability += major * 100 + minor;
+          }
+        }
+      }
+    }
 
     DeviceInfo info;
     info.gpuIdx = gpuIdx;
     info.deviceId = deviceIds[gpuIdx];
     info.name = name;
     info.vendor = vendor;
+    info.deviceType = deviceType;
+    info.openCLVersion = openCLVersion;
+    info.defaultDesirability = defaultDesirability;
     allDeviceInfos.push_back(info);
   }
 
@@ -267,16 +309,34 @@ vector<DeviceInfo> DeviceInfo::getAllDeviceInfosOnSystem(Logger* logger) {
 //----------------------------------------------------------------------------------------
 
 
-DevicesContext::DevicesContext(const vector<DeviceInfo>& allDeviceInfos, const vector<int>& gIdxsToUse, bool enableProfiling)
+DevicesContext::DevicesContext(const vector<DeviceInfo>& allDeviceInfos, const vector<int>& gIdxsToUse, Logger* logger, bool enableProfiling)
   : devicesToUse(),
     uniqueDeviceNamesToUse()
 {
+  defaultGpuIdx = 0;
+  int bestDesirability = 0;
+  for(int gpuIdx = 0; gpuIdx<allDeviceInfos.size(); gpuIdx++) {
+    if(allDeviceInfos[gpuIdx].defaultDesirability > bestDesirability) {
+      defaultGpuIdx = gpuIdx;
+      bestDesirability = allDeviceInfos[gpuIdx].defaultDesirability;
+    }
+  }
+
   //Sort and ensure no duplicates
   vector<int> gpuIdxsToUse = gIdxsToUse;
   std::sort(gpuIdxsToUse.begin(),gpuIdxsToUse.end());
   for(size_t i = 1; i<gpuIdxsToUse.size(); i++) {
     if(gpuIdxsToUse[i-1] == gpuIdxsToUse[i])
       throw StringError("Requested gpuIdx/device more than once: " + Global::intToString(gpuIdxsToUse[i]));
+  }
+
+  //Handle default gpu idx
+  if(gpuIdxsToUse.size() > 0 && gpuIdxsToUse[0] == -1) {
+    if(contains(gpuIdxsToUse,defaultGpuIdx))
+      gpuIdxsToUse.erase(gpuIdxsToUse.begin());
+    else
+      gpuIdxsToUse[0] = defaultGpuIdx;
+    std::sort(gpuIdxsToUse.begin(),gpuIdxsToUse.end());
   }
 
   vector<cl_device_id> deviceIdsToUse;
@@ -309,6 +369,16 @@ DevicesContext::DevicesContext(const vector<DeviceInfo>& allDeviceInfos, const v
     device.info = allDeviceInfos[gpuIdxsToUse[i]];
     device.commandQueue = commandQueue;
     devicesToUse.push_back(device);
+
+    string message =
+      "Using OpenCL Device " + Global::intToString(gpuIdxsToUse[i]) + ": " + device.info.name +
+      " (" + device.info.vendor + ") " +
+      device.info.openCLVersion;
+    if(logger != NULL) {
+      logger->write(message);
+      if(!logger->isLoggingToStdout() && !logger->isLoggingToStderr())
+        cerr << message << endl;
+    }
   }
 
   for(size_t i = 0; i<gpuIdxsToUse.size(); i++) {
@@ -328,6 +398,8 @@ DevicesContext::~DevicesContext() {
 }
 
 const InitializedDevice& DevicesContext::findGpuExn(int gpuIdx) const {
+  if(gpuIdx == -1)
+    gpuIdx = defaultGpuIdx;
   for(int i = 0; i<devicesToUse.size(); i++) {
     if(devicesToUse[i].info.gpuIdx == gpuIdx)
       return devicesToUse[i];
@@ -510,6 +582,7 @@ cl_int OpenCLHelpers::doWinogradTransform(
   int batchSize, int nnXLen, int nnYLen,
   int numTilesX, int numTilesY,
   int inChannels,
+  int convSize,
   cl_event* eventBuf
 ) {
   clSetKernelArg(kernel, 0, sizeof(cl_mem), (void *)&input);
@@ -523,9 +596,9 @@ cl_int OpenCLHelpers::doWinogradTransform(
 
   static constexpr int nKernelDims = 3;
   size_t localSizes[nKernelDims] = {
-    (size_t)tuneParams.conv3x3.transLocalSize0,
-    (size_t)tuneParams.conv3x3.transLocalSize1,
-    (size_t)tuneParams.conv3x3.transLocalSize2
+    (size_t)(convSize == 3 ? tuneParams.conv3x3.transLocalSize0 : tuneParams.conv5x5.transLocalSize0),
+    (size_t)(convSize == 3 ? tuneParams.conv3x3.transLocalSize1 : tuneParams.conv5x5.transLocalSize1),
+    (size_t)(convSize == 3 ? tuneParams.conv3x3.transLocalSize2 : tuneParams.conv5x5.transLocalSize2)
   };
 
   size_t globalSizes[nKernelDims] = {
@@ -549,6 +622,7 @@ cl_int OpenCLHelpers::doWinogradUntransform(
   int batchSize, int nnXLen, int nnYLen,
   int numTilesX, int numTilesY,
   int outChannels,
+  int convSize,
   cl_event* eventBuf
 ) {
   clSetKernelArg(kernel, 0, sizeof(cl_mem), (void *)&convWorkspace2);
@@ -562,9 +636,9 @@ cl_int OpenCLHelpers::doWinogradUntransform(
 
   static constexpr int nKernelDims = 3;
   size_t localSizes[nKernelDims] = {
-    (size_t)tuneParams.conv3x3.untransLocalSize0,
-    (size_t)tuneParams.conv3x3.untransLocalSize1,
-    (size_t)tuneParams.conv3x3.untransLocalSize2
+    (size_t)(convSize == 3 ? tuneParams.conv3x3.untransLocalSize0 : tuneParams.conv5x5.untransLocalSize0),
+    (size_t)(convSize == 3 ? tuneParams.conv3x3.untransLocalSize1 : tuneParams.conv5x5.untransLocalSize1),
+    (size_t)(convSize == 3 ? tuneParams.conv3x3.untransLocalSize2 : tuneParams.conv5x5.untransLocalSize2)
   };
 
   size_t globalSizes[nKernelDims] = {

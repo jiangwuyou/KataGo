@@ -24,8 +24,9 @@ static NNEvaluator* startNNEval(
   int nnMutexPoolSizePowerOfTwo = 12;
   bool debugSkipNeuralNet = modelFile == "/dev/null";
   bool alwaysIncludeOwnerMap = false;
-  double nnPolicyTemperature = 1.0;
+  float nnPolicyTemperature = 1.0;
   const string openCLTunerFile = "";
+  bool openCLReTunePerBoardSize = false;
   NNEvaluator* nnEval = new NNEvaluator(
     modelName,
     modelFile,
@@ -43,7 +44,8 @@ static NNEvaluator* startNNEval(
     debugSkipNeuralNet,
     alwaysIncludeOwnerMap,
     nnPolicyTemperature,
-    openCLTunerFile
+    openCLTunerFile,
+    openCLReTunePerBoardSize
   );
   (void)inputsUseNHWC;
 
@@ -204,7 +206,7 @@ void Tests::runSelfplayInitTestsWithNN(const string& modelFile) {
     fancyModes.forkSidePositionProb = 0.40;
     fancyModes.cheapSearchProb = 0.5;
     fancyModes.cheapSearchVisits = 20;
-    fancyModes.cheapSearchTargetWeight = 0.123;
+    fancyModes.cheapSearchTargetWeight = 0.123f;
     fancyModes.earlyForkGameProb = 0.5;
     fancyModes.earlyForkGameExpectedMoveProp = 0.05;
     fancyModes.earlyForkGameMinChoices = 2;

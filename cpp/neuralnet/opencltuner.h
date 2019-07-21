@@ -51,6 +51,30 @@ struct OpenCLTuneParams {
   };
   Conv3x3Params conv3x3 = Conv3x3Params();
 
+  struct Conv5x5Params {
+    //Winograd input and output tile sizes
+    int INTILE_XSIZE = 6;
+    int INTILE_YSIZE = 6;
+    int OUTTILE_XSIZE = 2;
+    int OUTTILE_YSIZE = 2;
+
+    int transLocalSize0 = 1;
+    int transLocalSize1 = 1;
+    int transLocalSize2 = 1;
+
+    int untransLocalSize0 = 1;
+    int untransLocalSize1 = 1;
+    int untransLocalSize2 = 1;
+
+    std::string desc() const;
+    std::string transDesc() const;
+    std::string untransDesc() const;
+    std::string compileOptions() const;
+    void fillFromDesc(const std::string& fileName, const std::string& desc);
+    bool isValid() const;
+  };
+  Conv5x5Params conv5x5 = Conv5x5Params();
+
   struct GPoolParams {
     int XYSTRIDE = 1;
     int CHANNELSTRIDE = 1;
@@ -87,6 +111,7 @@ namespace OpenCLTuner {
   constexpr int DEFAULT_X_SIZE = NNPos::MAX_BOARD_LEN;
   constexpr int DEFAULT_Y_SIZE = NNPos::MAX_BOARD_LEN;
   constexpr int DEFAULT_BATCH_SIZE = 2;
+  constexpr int DEFAULT_WINOGRAD_3X3_TILE_SIZE = 4;
 
   void tune(
     const OpenCLTuneParams& initialConfig,
@@ -97,6 +122,7 @@ namespace OpenCLTuner {
     int nnYLen,
     const ModelDesc* model,
     bool full,
+    int winograd3x3TileSize,
     std::ostream& out,
     std::function<void(const OpenCLTuneParams&)> handleBestSoFar
   );
@@ -109,6 +135,7 @@ namespace OpenCLTuner {
     const std::string& gpuName,
     int gpuIdxForTuning,
     Logger* logger,
+    bool openCLReTunePerBoardSize,
     int nnXLen,
     int nnYLen,
     const ModelDesc* model,

@@ -23,9 +23,10 @@ using namespace OpenCLHelpers;
 #define MAYBE_EVENTREF &event
 #define MAYBE_FREE_EVENT (void)0
 
-#define MAYBE_PROFILE(_name,period) {                                   \
+#define MAYBE_PROFILE(_name) {                                          \
     static int counter = 0;                                             \
     static double timeTaken = 0;                                        \
+    static bool profilePrintAdded = false;                              \
     const char* _profileName = (_name);                                 \
     handle->profileEvents.push_back(event);                             \
     handle->profileCallbacks.push_back(std::function<void()>([event,_profileName]() { \
@@ -35,15 +36,19 @@ using namespace OpenCLHelpers;
           profileErr = clGetEventProfilingInfo(event, CL_PROFILING_COMMAND_END, sizeof(time_end), &time_end, NULL); CHECK_ERR(profileErr) ; \
           timeTaken += (time_end - time_start) * 1e-9;                  \
           counter++;                                                    \
-          if(counter % (period) == 0)                                   \
-            cout << _profileName << " " << counter << " " << timeTaken/counter << " " << timeTaken << "\n"; \
         }));                                                            \
+    if(!profilePrintAdded) {                                            \
+      profilePrintAdded = true;                                         \
+      handle->profileResultPrinters.push_back(std::function<void()>([_profileName]() { \
+            cout << _profileName << " " << counter << " " << timeTaken/counter << " " << timeTaken << "\n"; \
+          }));                                                          \
+    }                                                                   \
   }
 #else
 #define MAYBE_EVENT (void)0
 #define MAYBE_EVENTREF NULL
 #define MAYBE_FREE_EVENT (void)0
-#define MAYBE_PROFILE(name,period) (void)0
+#define MAYBE_PROFILE(name) (void)0
 #endif
 
 template<typename T>
@@ -103,6 +108,7 @@ struct CompiledPrograms {
 
   cl_program conv2dNCHWProgram;
   cl_program winogradConv3x3NCHWProgram;
+  cl_program winogradConv5x5NCHWProgram;
   cl_program scaleBiasMaskNCHWProgram;
   cl_program scaleBiasMaskReluNCHWProgram;
   cl_program addPointWiseProgram;
@@ -124,6 +130,10 @@ struct CompiledPrograms {
     winogradConv3x3NCHWProgram = compileProgram(
       "winogradConv3x3NCHWProgram", context, deviceIdsToUse, OpenCLKernels::winogradConvNCHW,
       tuneParams.conv3x3.compileOptions()
+    );
+    winogradConv5x5NCHWProgram = compileProgram(
+      "winogradConv5x5NCHWProgram", context, deviceIdsToUse, OpenCLKernels::winogradConvNCHW,
+      tuneParams.conv5x5.compileOptions()
     );
 
     scaleBiasMaskNCHWProgram = compileProgram("scaleBiasMaskNCHWProgram", context, deviceIdsToUse, OpenCLKernels::scaleBiasMaskNCHW, "");
@@ -156,6 +166,7 @@ struct CompiledPrograms {
   ~CompiledPrograms() {
     clReleaseProgram(conv2dNCHWProgram);
     clReleaseProgram(winogradConv3x3NCHWProgram);
+    clReleaseProgram(winogradConv5x5NCHWProgram);
     clReleaseProgram(scaleBiasMaskNCHWProgram);
     clReleaseProgram(scaleBiasMaskReluNCHWProgram);
     clReleaseProgram(addPointWiseProgram);
@@ -190,7 +201,7 @@ struct ComputeContext {
 
   ComputeContext(const vector<int>& gIdxs, Logger* logger, std::function<OpenCLTuneParams(const string&,int)> getParamsForDeviceName) {
     vector<DeviceInfo> allDeviceInfos = DeviceInfo::getAllDeviceInfosOnSystem(logger);
-    devicesContext = new DevicesContext(allDeviceInfos,gIdxs,liveProfilingKernels);
+    devicesContext = new DevicesContext(allDeviceInfos,gIdxs,logger,liveProfilingKernels);
 
     for(int i = 0; i<devicesContext->uniqueDeviceNamesToUse.size(); i++) {
       const string& name = devicesContext->uniqueDeviceNamesToUse[i];
@@ -241,15 +252,16 @@ ComputeContext* NeuralNet::createComputeContext(
   int nnXLen,
   int nnYLen,
   string openCLTunerFile,
+  bool openCLReTunePerBoardSize,
   const LoadedModel* loadedModel
 ) {
   if(gpuIdxs.size() <= 0)
     throw StringError("NeuralNet::createComputeContext - specified no gpus to use");
 
   std::function<OpenCLTuneParams(const string&,int)> getParamsForDeviceName =
-    [&openCLTunerFile,logger,nnXLen,nnYLen,loadedModel](const string& name, int gpuIdxForTuning) {
+    [&openCLTunerFile,openCLReTunePerBoardSize,logger,nnXLen,nnYLen,loadedModel](const string& name, int gpuIdxForTuning) {
     bool full = false;
-    return OpenCLTuner::loadOrAutoTune(openCLTunerFile,name,gpuIdxForTuning,logger,nnXLen,nnYLen,&(loadedModel->modelDesc),full);
+    return OpenCLTuner::loadOrAutoTune(openCLTunerFile,name,gpuIdxForTuning,logger,openCLReTunePerBoardSize,nnXLen,nnYLen,&(loadedModel->modelDesc),full);
   };
   return new ComputeContext(gpuIdxs,logger,getParamsForDeviceName);
 }
@@ -271,6 +283,8 @@ struct ComputeHandleInternal {
 
   cl_kernel winogradConv3x3NCHWTransformKernel;
   cl_kernel winogradConv3x3NCHWUntransformKernel;
+  cl_kernel winogradConv5x5NCHWTransformKernel;
+  cl_kernel winogradConv5x5NCHWUntransformKernel;
   cl_kernel scaleBiasMaskNCHWKernel;
   cl_kernel scaleBiasMaskReluNCHWKernel;
   cl_kernel addPointWiseKernel;
@@ -289,6 +303,7 @@ struct ComputeHandleInternal {
 
   vector<cl_event> profileEvents;
   vector<std::function<void()>> profileCallbacks;
+  vector<std::function<void()>> profileResultPrinters;
 
   ComputeHandleInternal(ComputeContext* ctx, int gpuIdx, bool inputsUseNHWC, bool useNHWC, bool useFP16) {
     computeContext = ctx;
@@ -312,7 +327,13 @@ struct ComputeHandleInternal {
     CHECK_ERR(err);
 
     winogradConv3x3NCHWTransformKernel = clCreateKernel(progs->winogradConv3x3NCHWProgram, "transform", &err);
+    CHECK_ERR(err);
     winogradConv3x3NCHWUntransformKernel = clCreateKernel(progs->winogradConv3x3NCHWProgram, "untransform", &err);
+    CHECK_ERR(err);
+
+    winogradConv5x5NCHWTransformKernel = clCreateKernel(progs->winogradConv5x5NCHWProgram, "transform", &err);
+    CHECK_ERR(err);
+    winogradConv5x5NCHWUntransformKernel = clCreateKernel(progs->winogradConv5x5NCHWProgram, "untransform", &err);
     CHECK_ERR(err);
 
     scaleBiasMaskNCHWKernel = clCreateKernel(progs->scaleBiasMaskNCHWProgram, "scaleBiasMaskNCHW", &err);
@@ -356,6 +377,8 @@ struct ComputeHandleInternal {
     clReleaseKernel(conv2dNCHWKernel);
     clReleaseKernel(winogradConv3x3NCHWTransformKernel);
     clReleaseKernel(winogradConv3x3NCHWUntransformKernel);
+    clReleaseKernel(winogradConv5x5NCHWTransformKernel);
+    clReleaseKernel(winogradConv5x5NCHWUntransformKernel);
     clReleaseKernel(scaleBiasMaskNCHWKernel);
     clReleaseKernel(scaleBiasMaskReluNCHWKernel);
     clReleaseKernel(addPointWiseKernel);
@@ -405,7 +428,7 @@ static void addChannelBiases(ComputeHandleInternal* handle, cl_mem src, cl_mem b
     handle->commandQueue, kernel, nKernelDims, NULL, globalSizes, localSizes, 0, NULL, MAYBE_EVENTREF
   );
   CHECK_ERR(err);
-  MAYBE_PROFILE("AddChannelBiases",50);
+  MAYBE_PROFILE("AddChannelBiases");
   MAYBE_FREE_EVENT;
 }
 
@@ -424,7 +447,7 @@ static void addPointWise(ComputeHandleInternal* handle, cl_mem acc, cl_mem value
     handle->commandQueue, kernel, nKernelDims, NULL, globalSizes, localSizes, 0, NULL, MAYBE_EVENTREF
   );
   CHECK_ERR(err);
-  MAYBE_PROFILE("AddPointWise",100);
+  MAYBE_PROFILE("AddPointWise");
   MAYBE_FREE_EVENT;
 }
 
@@ -440,7 +463,7 @@ static void performGPool(ComputeHandleInternal* handle, int batchSize, int gpool
     MAYBE_EVENTREF
   );
   CHECK_ERR(err);
-  MAYBE_PROFILE("PerformGPool",50);
+  MAYBE_PROFILE("PerformGPool");
   MAYBE_FREE_EVENT;
 }
 
@@ -456,7 +479,7 @@ static void performValueHeadPool(ComputeHandleInternal* handle, int batchSize, i
     MAYBE_EVENTREF
   );
   CHECK_ERR(err);
-  MAYBE_PROFILE("PerformVHPool",30);
+  MAYBE_PROFILE("PerformVHPool");
   MAYBE_FREE_EVENT;
 }
 
@@ -473,7 +496,7 @@ static void transposeNCHW(ComputeHandleInternal* handle, int batchSize, int cSiz
     MAYBE_EVENTREF
   );
   CHECK_ERR(err);
-  MAYBE_PROFILE("TransposeNCHW",30);
+  MAYBE_PROFILE("TransposeNCHW");
   MAYBE_FREE_EVENT;
 }
 
@@ -495,7 +518,7 @@ static void doMirror(ComputeHandleInternal* handle, int batchSize, int mSize, in
     handle->commandQueue, kernel, nKernelDims, NULL, globalSizes, localSizes, 0, NULL, MAYBE_EVENTREF
   );
   CHECK_ERR(err);
-  MAYBE_PROFILE("DoMirror",30);
+  MAYBE_PROFILE("DoMirror");
   MAYBE_FREE_EVENT;
 }
 
@@ -655,45 +678,96 @@ struct ConvLayer {
       }
       filter = createReadOnlyBuffer(handle,transWeights);
     }
-    else if(convXSize == 3 && convYSize == 3) {
-      int inTileXSize = handle->tuneParams.conv3x3.INTILE_XSIZE;
-      int inTileYSize = handle->tuneParams.conv3x3.INTILE_YSIZE;
-      int outTileXSize = handle->tuneParams.conv3x3.OUTTILE_XSIZE;
-      int outTileYSize = handle->tuneParams.conv3x3.OUTTILE_YSIZE;
+    else if((convXSize == 3 && convYSize == 3) || (convXSize == 5 && convYSize == 5)) {
+      int inTileXSize = convXSize == 3 ? handle->tuneParams.conv3x3.INTILE_XSIZE : handle->tuneParams.conv5x5.INTILE_XSIZE;
+      int inTileYSize = convYSize == 3 ? handle->tuneParams.conv3x3.INTILE_YSIZE : handle->tuneParams.conv5x5.INTILE_YSIZE;
+      int outTileXSize = convXSize == 3 ? handle->tuneParams.conv3x3.OUTTILE_XSIZE : handle->tuneParams.conv5x5.OUTTILE_XSIZE;
+      int outTileYSize = convYSize == 3 ? handle->tuneParams.conv3x3.OUTTILE_YSIZE : handle->tuneParams.conv5x5.OUTTILE_YSIZE;
 
       numTilesX = (nnXLen + outTileXSize - 1) / outTileXSize;
       numTilesY = (nnYLen + outTileYSize - 1) / outTileYSize;
       inTileXYSize = inTileXSize * inTileYSize;
       outTileXYSize = outTileXSize * outTileYSize;
 
-      assert(inTileXSize == 4);
-      assert(inTileYSize == 4);
+      static constexpr int maxTileXSize = 6;
+      static constexpr int maxTileYSize = 6;
+
+      assert((convXSize == 3 && convYSize == 3) ? (inTileXSize == 4 && outTileXSize == 2) || (inTileXSize == 6 && outTileXSize == 4) : true);
+      assert((convXSize == 5 && convYSize == 5) ? (inTileYSize == 6 && outTileYSize == 2) : true);
 
       //INTILE_YSIZE, INTILE_XSIZE, ic, oc
       vector<float> transWeights(inTileXYSize * inChannels * outChannels);
-      auto transform = [](float& a0, float& a1, float& a2, float& a3) {
+      auto transform3x3_4 = [](float& a0, float& a1, float& a2, float& a3) {
         float z0 = a0; float z1 = a1; float z2 = a2;
         a0 = z0;
         a1 = 0.5f * (z0 + z1 + z2);
         a2 = 0.5f * (z0 - z1 + z2);
         a3 = z2;
       };
+      auto transform3x3_6 = [](float& a0, float& a1, float& a2, float& a3, float& a4, float& a5) {
+        float z0 = a0; float z1 = a1; float z2 = a2;
+        // Low error winograd
+        // double sqrt2 = sqrt(2.0);
+        // a0 = z0;
+        // a1 = (float)( (1.0 / 3.0) * (-2.0*z0 - sqrt2*z1 - z2) );
+        // a2 = (float)( (1.0 / 3.0) * (-2.0*z0 + sqrt2*z1 - z2) );
+        // a3 = (float)( (1.0 / 6.0) * (z0 + sqrt2*z1 + 2.0*z2) );
+        // a4 = (float)( (1.0 / 6.0) * (z0 - sqrt2*z1 + 2.0*z2) );
+        // a5 = z2;
+        a0 = 0.25f * z0;
+        a1 = (float)( (1.0 / 6.0) * (-z0 - z1 - z2) );
+        a2 = (float)( (1.0 / 6.0) * (-z0 + z1 - z2) );
+        a3 = (float)( (1.0 / 24.0) * (z0 + 2.0*z1 + 4.0*z2) );
+        a4 = (float)( (1.0 / 24.0) * (z0 - 2.0*z1 + 4.0*z2) );
+        a5 = 1.0f * z2;
+      };
+      auto transform5x5_6 = [](float& a0, float& a1, float& a2, float& a3, float& a4, float& a5) {
+        float z0 = a0; float z1 = a1; float z2 = a2; float z3 = a3; float z4 = a4;
+        a0 = 0.25f * z0;
+        a1 = (float)( (1.0 / 6.0) * (-z0 - z1 - z2 - z3 - z4) );
+        a2 = (float)( (1.0 / 6.0) * (-z0 + z1 - z2 + z3 - z4) );
+        a3 = (float)( (1.0 / 24.0) * (z0 + 2.0*z1 + 4.0*z2 + 8.0*z3 + 16.0*z4) );
+        a4 = (float)( (1.0 / 24.0) * (z0 - 2.0*z1 + 4.0*z2 - 8.0*z3 + 16.0*z4) );
+        a5 = 1.0f * z4;
+      };
 
       for(int oc = 0; oc < outChannels; oc++) {
         for(int ic = 0; ic < inChannels; ic++) {
-          float tmp[4][4];
-          for(int subY = 0; subY < 3; subY++) {
-            for(int subX = 0; subX < 3; subX++) {
+          float tmp[maxTileYSize][maxTileXSize];
+          for(int subY = 0; subY < convYSize; subY++) {
+            for(int subX = 0; subX < convXSize; subX++) {
               tmp[subY][subX] = desc->weights[((oc * inChannels + ic) * convYSize + subY) * convXSize + subX];
             }
           }
-          for(int subY = 0; subY < 3; subY++)
-            transform(tmp[subY][0], tmp[subY][1], tmp[subY][2], tmp[subY][3]);
-          for(int subX = 0; subX < 4; subX++)
-            transform(tmp[0][subX], tmp[1][subX], tmp[2][subX], tmp[3][subX]);
 
-          for(int subY = 0; subY < 4; subY++) {
-            for(int subX = 0; subX < 4; subX++) {
+          if(convXSize == 3 && inTileXSize == 4) {
+            for(int subY = 0; subY < convYSize; subY++)
+              transform3x3_4(tmp[subY][0], tmp[subY][1], tmp[subY][2], tmp[subY][3]);
+          }
+          else if(convXSize == 3 && inTileXSize == 6) {
+            for(int subY = 0; subY < convYSize; subY++)
+              transform3x3_6(tmp[subY][0], tmp[subY][1], tmp[subY][2], tmp[subY][3], tmp[subY][4], tmp[subY][5]);
+          }
+          else if(convXSize == 5 && inTileXSize == 6) {
+            for(int subY = 0; subY < convYSize; subY++)
+              transform5x5_6(tmp[subY][0], tmp[subY][1], tmp[subY][2], tmp[subY][3], tmp[subY][4], tmp[subY][5]);
+          }
+
+          if(convYSize == 3 && inTileYSize == 4) {
+            for(int subX = 0; subX < inTileXSize; subX++)
+              transform3x3_4(tmp[0][subX], tmp[1][subX], tmp[2][subX], tmp[3][subX]);
+          }
+          else if(convYSize == 3 && inTileYSize == 6) {
+            for(int subX = 0; subX < inTileXSize; subX++)
+              transform3x3_6(tmp[0][subX], tmp[1][subX], tmp[2][subX], tmp[3][subX], tmp[4][subX], tmp[5][subX]);
+          }
+          else if(convYSize == 5 && inTileYSize == 6) {
+            for(int subX = 0; subX < inTileXSize; subX++)
+              transform5x5_6(tmp[0][subX], tmp[1][subX], tmp[2][subX], tmp[3][subX], tmp[4][subX], tmp[5][subX]);
+          }
+
+          for(int subY = 0; subY < inTileYSize; subY++) {
+            for(int subX = 0; subX < inTileXSize; subX++) {
               transWeights[((subY*inTileXSize + subX)*inChannels + ic)*outChannels + oc] = tmp[subY][subX];
             }
           }
@@ -716,7 +790,7 @@ struct ConvLayer {
     static const size_t roundSizeNeeded = 1;
     return
       roundUpToMultiple(numTilesX * numTilesY * maxBatchSize, roundSizeNeeded) *
-      roundUpToMultiple(inChannels,roundSizeNeeded) *
+      roundUpToMultiple(std::max(inChannels,outChannels),roundSizeNeeded) *
       inTileXYSize;
   }
 
@@ -738,26 +812,30 @@ struct ConvLayer {
         MAYBE_EVENTREF
       );
       CHECK_ERR(err);
-      MAYBE_PROFILE("MATMULCONV1x1",30);
+      MAYBE_PROFILE("MATMULCONV1x1");
       MAYBE_FREE_EVENT;
     }
-    else if(convXSize == 3 && convYSize == 3) {
+    else if((convXSize == 3 && convYSize == 3) || (convXSize == 5 && convYSize == 5)) {
 
       {
         cl_int err;
         MAYBE_EVENT;
         err = doWinogradTransform(
-          handle->winogradConv3x3NCHWTransformKernel,
+          (convXSize == 3 && convYSize == 3) ?
+          handle->winogradConv3x3NCHWTransformKernel :
+          handle->winogradConv5x5NCHWTransformKernel,
           handle->commandQueue,
           handle->tuneParams,
           input,convWorkspace,
           batchSize,nnXLen,nnYLen,
           numTilesX,numTilesY,
           inChannels,
+          convXSize,
           MAYBE_EVENTREF
         );
         CHECK_ERR(err);
-        MAYBE_PROFILE("3x3TRANSFORM",350);
+        if(convXSize == 3 && convYSize == 3) { MAYBE_PROFILE("3x3TRANSFORM"); }
+        else { MAYBE_PROFILE("5x5TRANSFORM"); }
         MAYBE_FREE_EVENT;
       }
 
@@ -775,7 +853,8 @@ struct ConvLayer {
           MAYBE_EVENTREF
         );
         CHECK_ERR(err);
-        MAYBE_PROFILE("MATMULCONV3x3",350);
+        if(convXSize == 3 && convYSize == 3) { MAYBE_PROFILE("MATMULCONV3x3"); }
+        else { MAYBE_PROFILE("MATMULCONV5x5"); }
         MAYBE_FREE_EVENT;
       }
 
@@ -783,17 +862,21 @@ struct ConvLayer {
         cl_int err;
         MAYBE_EVENT;
         err = doWinogradUntransform(
-          handle->winogradConv3x3NCHWUntransformKernel,
+          (convXSize == 3 && convYSize == 3) ?
+          handle->winogradConv3x3NCHWUntransformKernel :
+          handle->winogradConv5x5NCHWUntransformKernel,
           handle->commandQueue,
           handle->tuneParams,
           convWorkspace2,output,
           batchSize,nnXLen,nnYLen,
           numTilesX,numTilesY,
           outChannels,
+          convXSize,
           MAYBE_EVENTREF
         );
         CHECK_ERR(err);
-        MAYBE_PROFILE("3x3UNTRANSFORM",350);
+        if(convXSize == 3 && convYSize == 3) { MAYBE_PROFILE("3x3UNTRANSFORM"); }
+        else { MAYBE_PROFILE("5x5UNTRANSFORM"); }
         MAYBE_FREE_EVENT;
       }
 
@@ -840,10 +923,10 @@ struct ConvLayer {
       );
       CHECK_ERR(err);
       if(convXRadius == 2 && convYRadius == 2) {
-        MAYBE_PROFILE("CONV5",20);
+        MAYBE_PROFILE("CONV5");
       }
       else {
-        MAYBE_PROFILE("CONV",30);
+        MAYBE_PROFILE("CONV");
       }
       MAYBE_FREE_EVENT;
     }
@@ -926,7 +1009,7 @@ struct BatchNormLayer {
       handle->commandQueue, kernel, nKernelDims, NULL, globalSizes, localSizes, 0, NULL, MAYBE_EVENTREF
     );
     CHECK_ERR(err);
-    MAYBE_PROFILE("BatchNorm",350);
+    MAYBE_PROFILE("BatchNorm");
     MAYBE_FREE_EVENT;
   }
 
@@ -997,7 +1080,7 @@ struct MatMulLayer {
 
     );
     CHECK_ERR(err);
-    MAYBE_PROFILE("PLAINMATMUL",200);
+    MAYBE_PROFILE("PLAINMATMUL");
     MAYBE_FREE_EVENT;
   }
 
@@ -1044,7 +1127,7 @@ struct MatBiasLayer {
       handle->commandQueue, kernel, nKernelDims, NULL, globalSizes, localSizes, 0, NULL, MAYBE_EVENTREF
     );
     CHECK_ERR(err);
-    MAYBE_PROFILE("MatBias",50);
+    MAYBE_PROFILE("MatBias");
     MAYBE_FREE_EVENT;
   }
 
@@ -1313,7 +1396,7 @@ struct Trunk {
         delete block;
       }
       else if(blocks[i].first == DILATED_BLOCK_KIND) {
-        ASSERT_UNREACHABLE;
+        //ASSERT_UNREACHABLE;
       }
       else if(blocks[i].first == GLOBAL_POOLING_BLOCK_KIND) {
         GlobalPoolingResidualBlock* block = (GlobalPoolingResidualBlock*)blocks[i].second;
@@ -1724,7 +1807,7 @@ static void computeMaskSums(
     MAYBE_EVENTREF
   );
   CHECK_ERR(err);
-  MAYBE_PROFILE("MaskSums",30);
+  MAYBE_PROFILE("MaskSums");
   MAYBE_FREE_EVENT;
 }
 
@@ -1877,7 +1960,7 @@ struct Model {
         handle->commandQueue, kernel, nKernelDims, NULL, globalSizes, localSizes, 0, NULL, MAYBE_EVENTREF
       );
       CHECK_ERR(err);
-      MAYBE_PROFILE("ExtractMask",30);
+      MAYBE_PROFILE("ExtractMask");
       MAYBE_FREE_EVENT;
     }
 
@@ -2403,10 +2486,19 @@ void NeuralNet::getOutput(
     }
     handle->profileEvents.clear();
     handle->profileCallbacks.clear();
+
+    static int profileResultPrintCounter = 0;
+    profileResultPrintCounter += 1;
+    if(profileResultPrintCounter % 100 == 0) {
+      for(int i = 0; i<handle->profileResultPrinters.size(); i++) {
+        handle->profileResultPrinters[i]();
+      }
+    }
   }
   #else
   assert(handle->profileEvents.size() == 0);
   assert(handle->profileCallbacks.size() == 0);
+  assert(handle->profileResultPrinters.size() == 0);
   #endif
 
   assert(outputs.size() == batchSize);

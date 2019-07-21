@@ -153,9 +153,9 @@ static void testConvLayer(int64_t& numTestsRun) {
 
       //oc,ic,y,x
       vector<float> convWeights({
-          0,1,
-          1,-1,
-          10,0.1,
+          0.0f,1.0f,
+          1.0f,-1.0f,
+          10.0f,0.1f,
       });
       //NCHW
       vector<float> expected({
@@ -264,6 +264,67 @@ static void testConvLayer(int64_t& numTestsRun) {
       testConfigurations(label,batchSize,nnXLen,nnYLen,desc,input,expected);
     }
 
+    {
+      string label("5x5 convolution");
+
+      //oc,ic,y,x
+      vector<float> convWeights({
+          0,0,0,0,1,
+          0,0,0,1,0,
+          0,0,1,0,0,
+          0,0,0,0,0,
+          0,0,0,0,0,
+
+          0,0,0,0,0,
+          0,0,0,0,0,
+          0,0,1,0,0,
+          0,1,0,0,0,
+          1,0,0,0,0,
+
+          0,0,0,0,0,
+          0,0,0,0,0,
+          0,0,0,0,0,
+          0,0,0,0,0,
+          0,0,0,0,2,
+
+          0,0,0,0,0,
+          0,0,1,0,0,
+          2,0,0,0,0,
+          0,0,0,0,0,
+          0,0,0,0,0,
+      });
+
+      //NCHW
+      vector<float> expected({
+        5, 9,18,19,
+       13,21,20,16,
+       18,16,18,13,
+
+       16,16, 0, 2,
+        0, 1, 8,11,
+        3, 4,21,20,
+
+        1, 1, 2, 8,
+        4, 2,10, 2,
+        0,13, 2, 6,
+
+        0,12, 2, 0,
+        1, 0, 0, 6,
+        0, 2, 2, 4,
+      });
+
+      ConvLayerDesc desc;
+      desc.convYSize = 5;
+      desc.convXSize = 5;
+      desc.inChannels = inChannels;
+      desc.outChannels = 2;
+      desc.dilationY = 1;
+      desc.dilationX = 1;
+      desc.weights = convWeights;
+
+      testConfigurations(label,batchSize,nnXLen,nnYLen,desc,input,expected);
+    }
+
   }
 
 
@@ -326,13 +387,13 @@ static void testBatchNormLayer(int64_t& numTestsRun) {
 
       BatchNormLayerDesc desc;
       desc.numChannels = numChannels;
-      desc.epsilon = 0.1;
+      desc.epsilon = 0.1f;
       desc.hasScale = true;
       desc.hasBias = true;
-      desc.mean = vector<float>({0,2});
-      desc.variance = vector<float>({3.9,0.15});
-      desc.scale = vector<float>({0.1,1});
-      desc.bias = vector<float>({10.0,0.0});
+      desc.mean = vector<float>({0.0f,2.0f});
+      desc.variance = vector<float>({3.9f,0.15f});
+      desc.scale = vector<float>({0.1f,1.0f});
+      desc.bias = vector<float>({10.0f,0.0f});
 
       vector<float> mask({
         1,1,1,1,1,
@@ -344,17 +405,17 @@ static void testBatchNormLayer(int64_t& numTestsRun) {
 
       //NCHW
       vector<float> expected({
-          10.25, 10.25, 10.2, 10.2, 10.45,
-          10.05, 10.05, 10.4, 10.4, 10.45,
+          10.25f, 10.25f, 10.2f, 10.2f, 10.45f,
+          10.05f, 10.05f, 10.4f, 10.4f, 10.45f,
 
-          -4, -2, 0, 2, 4,
-          12, 10, 8, 6, 4,
+          -4.0f, -2.0f, 0.0f, 2.0f, 4.0f,
+          12.0f, 10.0f, 8.0f, 6.0f, 4.0f,
 
-          10.15, 10, 10.2, 10, 10.25,
-          10, 10.25, 10, 10.3, 10,
+          10.15f, 10.00f, 10.20f, 10.00f, 10.25f,
+          10.00f, 10.25f, 10.00f, 10.30f, 10.00f,
 
-          -2, -4, -4, 0, -2,
-          -4, 0, 0, -4, 0,
+          -2.0f, -4.0f, -4.0f, 0.0f, -2.0f,
+          -4.0f, 0.0f, 0.0f, -4.0f, 0.0f,
       });
       testConfigurations(label,batchSize,nnXLen,nnYLen,desc,input,mask,expected);
     }
@@ -364,13 +425,13 @@ static void testBatchNormLayer(int64_t& numTestsRun) {
 
       BatchNormLayerDesc desc;
       desc.numChannels = numChannels;
-      desc.epsilon = 0.1;
+      desc.epsilon = 0.1f;
       desc.hasScale = false;
       desc.hasBias = true;
-      desc.mean = vector<float>({0,2});
-      desc.variance = vector<float>({3.9,0.15});
-      desc.scale = vector<float>({1,1});
-      desc.bias = vector<float>({10.0,0.0});
+      desc.mean = vector<float>({0.0f,2.0f});
+      desc.variance = vector<float>({3.9f,0.15f});
+      desc.scale = vector<float>({1.0f,1.0f});
+      desc.bias = vector<float>({10.0f,0.0f});
 
       vector<float> mask({
         1,1,1,0,0,
@@ -469,13 +530,13 @@ static void testResidualBlock(int64_t& numTestsRun) {
     //Doubles all values
     desc.preBN.name = "preBN";
     desc.preBN.numChannels = trunkChannels;
-    desc.preBN.epsilon = 0.1;
+    desc.preBN.epsilon = 0.1f;
     desc.preBN.hasScale = true;
     desc.preBN.hasBias = true;
     desc.preBN.mean = vector<float>({0});
-    desc.preBN.variance = vector<float>({0.9});
+    desc.preBN.variance = vector<float>({0.9f});
     desc.preBN.scale = vector<float>({2});
-    desc.preBN.bias = vector<float>({0.0});
+    desc.preBN.bias = vector<float>({0});
 
     //ReLU gets applied, smooshing negatives
     //2,0,0,3,
@@ -522,13 +583,13 @@ static void testResidualBlock(int64_t& numTestsRun) {
     //Subtract 3 from all values in the 0th channel
     desc.midBN.name = "midBN";
     desc.midBN.numChannels = midChannels;
-    desc.midBN.epsilon = 0.1;
+    desc.midBN.epsilon = 0.1f;
     desc.midBN.hasScale = false;
     desc.midBN.hasBias = false;
     desc.midBN.mean = vector<float>({3,0});
-    desc.midBN.variance = vector<float>({0.9,0.9});
+    desc.midBN.variance = vector<float>({0.9f,0.9f});
     desc.midBN.scale = vector<float>({1,1});
-    desc.midBN.bias = vector<float>({0.0,0.0});
+    desc.midBN.bias = vector<float>({0,0});
 
     //ReLU gets applied, smooshing negatives
     //0,0,0,0,
@@ -671,11 +732,11 @@ static void testGlobalPoolingResidualBlock(int64_t& numTestsRun) {
     //Identity map
     desc.preBN.name = "preBN";
     desc.preBN.numChannels = trunkChannels;
-    desc.preBN.epsilon = 0.1;
+    desc.preBN.epsilon = 0.1f;
     desc.preBN.hasScale = true;
     desc.preBN.hasBias = true;
     desc.preBN.mean = vector<float>({0});
-    desc.preBN.variance = vector<float>({0.9});
+    desc.preBN.variance = vector<float>({0.9f});
     desc.preBN.scale = vector<float>({1});
     desc.preBN.bias = vector<float>({0});
 
@@ -743,11 +804,11 @@ static void testGlobalPoolingResidualBlock(int64_t& numTestsRun) {
     //Subtract 2 from all values in the 1th channel
     desc.gpoolBN.name = "gpoolBN";
     desc.gpoolBN.numChannels = gpoolChannels;
-    desc.gpoolBN.epsilon = 0.1;
+    desc.gpoolBN.epsilon = 0.1f;
     desc.gpoolBN.hasScale = false;
     desc.gpoolBN.hasBias = false;
     desc.gpoolBN.mean = vector<float>({0,0});
-    desc.gpoolBN.variance = vector<float>({0.9,0.9});
+    desc.gpoolBN.variance = vector<float>({0.9f,0.9f});
     desc.gpoolBN.scale = vector<float>({1,1});
     desc.gpoolBN.bias = vector<float>({0,-2});
 
@@ -791,11 +852,11 @@ static void testGlobalPoolingResidualBlock(int64_t& numTestsRun) {
     //Identity map
     desc.midBN.name = "midBN";
     desc.midBN.numChannels = regularChannels;
-    desc.midBN.epsilon = 0.1;
+    desc.midBN.epsilon = 0.1f;
     desc.midBN.hasScale = false;
     desc.midBN.hasBias = false;
     desc.midBN.mean = vector<float>({0});
-    desc.midBN.variance = vector<float>({0.9});
+    desc.midBN.variance = vector<float>({0.9f});
     desc.midBN.scale = vector<float>({1});
     desc.midBN.bias = vector<float>({0});
 
@@ -824,15 +885,17 @@ static void testGlobalPoolingResidualBlock(int64_t& numTestsRun) {
     });
 
     for(int i = 0; i<12; i++) {
-      expected[i] +=
+      expected[i] += (float)(
         56 + 28*(-11)*0.1 + 5 +
-        4 + 2*(-11)*0.1 + 1;
+        4 + 2*(-11)*0.1 + 1
+      );
       expected[i] *= mask[i];
     }
     for(int i = 12; i<24; i++) {
-      expected[i] +=
+      expected[i] += (float)(
         12 + 6*(sqrt(6)-14)*0.1 + 1 +
-        18 + 9*(sqrt(6)-14)*0.1 + 3;
+        18 + 9*(sqrt(6)-14)*0.1 + 3
+      );
       expected[i] *= mask[i];
     }
 
